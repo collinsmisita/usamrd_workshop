@@ -1,0 +1,187 @@
+---
+title: "QC_Explore_Cluster_scRNASeq"
+author: "Collins"
+date: "19/02/2025"
+output:
+  html_document:
+    df_print: paged
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+*Setup*
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Load Packages and set working Dir**
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+###if running locally, ensure we have the following installed in the system*
+#system("sudo apt install libgsl-dev")*
+#system("sudo apt-get install libhdf5-dev")  # for hdf5r*
+# gsl <- "https://cran.r-project.org/src/contrib/Archive/gsl/gsl_2.1-6.tar.gz"
+# install.packages(gsl, repos=NULL, type="source");  library(gsl)
+# ggraph <- "https://cran.r-project.org/src/contrib/Archive/ggraph/ggraph_2.1.0.tar.gz"
+#matrix <- "https://cran.r-project.org/src/contrib/Archive/Matrix/Matrix_1.5-1.tar.gz"
+#install.packages(matrix, repos=NULL, type="source"); library(Matrix)
+# install.packages(ggraph, repos=NULL, type="source"); library(ggraph)
+# install.packages("ggplot2"); library(ggplot2)
+# install.packages("dplyr"); library(dplyr)
+# BiocManager::install("scRepertoire"); library(scRepertoire) ##Say no to updates
+# install.packages('Seurat'); library(Seurat)
+# BiocManager::install("scater"); library(scater)
+# BiocManager::install("scDblFinder"); library(scDblFinder)
+# BiocManager::install("celldex"); library(celldex)
+# BiocManager::install("SingleR"); library(SingleR)
+# BiocManager::install("enrichplot"); library(enrichplot)
+# require(devtools); install_version("rvcheck", version = "0.1.8", repos = "http://cran.us.r-project.org")
+# BiocManager::install("clusterProfiler"); library(clusterProfiler)
+# BiocManager::install("org.Hs.eg.db"); library(org.Hs.eg.db)
+# scatterpie <- "https://cran.r-project.org/src/contrib/Archive/scatterpie/scatterpie_0.1.8.tar.gz"
+# install.packages(scatterpie, repos=NULL, type="source"); library(scatterpie)
+# devtools::install_github('immunogenomics/presto'); library(presto)  # faster Wilcoxon test
+#install.packages("R.utils")
+#install.packages("harmony")
+##Do not install these, they are already installed.
+####devtools::install_github('satijalab/seurat-wrappers@d28512f804d5fe05e6d68900ca9221020d52cf1d', upgrade=F)
+####devtools::install_github('satijalab/seurat-data')
+###Have pacman installed for package management*
+#install.packages("pacman")
+
+pacman::p_load(BiocManager, gggraph, ggplot2, clustree, hdf5r,R.utils,seurat-data,
+               scRepertoire, Seurat, scater, scDblFinder,harmony,seurat-wrappers,
+               celldex, SingleR,clusterProfiler, org.Hs.eg.db, 
+               dplyr, Matrix, rmarkdown, gprofiler2, install = F)
+
+setwd("/home2/cmmoranga/training_2025/usamrd_scrnaseq_workshop")
+
+#dir.create("figures")
+#dir.create("datasets")
+#dir.create("associated_files")
+#dir.create("rdsfiles")
+#dir.create("output_txtfiles")
+#dir.create("rds_images")
+```
+
+*Data for this training will be obtained from https://www.nature.com/articles/s41591-020-0901-9*
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+#download.file('https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE145926&format=file','GSE145926_RAW.tar')
+#system("tar -xf GSE145926_RAW.tar")
+#system("mv GSM* datasets")
+system("ls -lh datasets")
+#system("rm datasets/*annotations*") #these are TCRsequencing data which we will not focus on now. 
+
+dat <- dir("/home2/cmmoranga/training_2025/usamrd_scrnaseq_workshop/datasets/") ; dat %>% knitr::kable()
+
+```
+The dat is is a Hierarchical Data Format version 5 (hdf5 or .h5 extension) - Just a format to store high dimensional dataset
+! [Hierarchical Data Format version 5 (HDF5)]('/home2/cmmoranga/training_2025/hdf5_structure4.jpg')
+
+**Make a Seurat Object for one sample**
+
+*Read10X_h5() function can read in  10x Chromium dataset - processed by cell ranger and saved in h5 format*
+The gene expression data has lots of zeroes, so this function is able to process that easily
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+#Create a count matrix
+C141 <- Read10X_h5("datasets/GSM4339769_C141_filtered_feature_bc_matrix.h5")
+
+## Preview the file - you see genes as row names and cells on the column names - the numbers represent expression
+# But the . represents no expression detected, so Seurat will represent it in a sparse matrix, that helps conserve memory
+C141[33493:33500,1:3]
+
+##See how the sparse matrix saves space and memory from 1600MB to 158MB in sparse format
+dense.size <- object.size(as.matrix(C141))
+sparse.size <- object.size(C141)
+format(dense.size, "MB")
+format(sparse.size, "MB")
+
+##But we can use the usual R commands to process the sparse matrix
+##Here we see the number of genes(they can be called features) and the number of cells
+dim(C141)
+rownames(C141)[1:3]
+colnames(C141)[1:3]
+
+##Finally we create a seurat object :
+sampleA <- CreateSeuratObject(counts = C141, project="sampleA", min.cells=3, min.features=200)
+
+```
+
+
+**We start Quality Control**
+
+*Here we remove doublets, and mitochodrial reads*
+The gene expression data has lots of zeroes, so this function is able to process that easily
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+sampleA #This prints the general information about the object
+##You see the number of cells and genes have reduced, because we filtered on the min number of genes and min number of cells
+
+## We can visualise the QC metrics for the first 5 cells
+head(sampleA@meta.data, 5)
+
+#we use scDblFinder under a SingleCellExperiment object, to remove doublets, which could be problematic in our dataset.The package uses a probability approach 
+sce_sampleA <- as.SingleCellExperiment(sampleA)
+sce_sampleA #print out the information about the object
+set.seed(123) ##ensure reprocibility
+#Run scDblFinder
+dbl_results <- scDblFinder(sce_sampleA, returnType = 'table') %>%
+  as.data.frame() %>% filter(type == 'real'); head(dbl_results)
+
+##We can count doublets and save the table for later, and remove them from the matrix
+dbl_results %>% dplyr::count(class)
+outfile = file.path('output_txtfiles/GSM4339769_doubletFile.txt')
+write.table(dbl_results, outfile, sep='\t', quote=F,  col.names=TRUE, row.names=TRUE)
+single_Cells = dbl_results %>% dplyr::filter(class == "singlet") %>% rownames()
+sampleA = sampleA[, single_Cells] 
+sampleA
+
+###Lets see how much mitochodria reads we have
+sampleA[["percent.mt"]] <- PercentageFeatureSet(sampleA, pattern="^MT-")
+sampleA@meta.data %>% head()
+mtPlot <- VlnPlot(sampleA, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol=3); mtPlot
+ggsave("figures/1_vln_plot_mt.jpeg",plot = mtPlot, bg = 'white')
+
+##Another way to visualise this 
+sampleA.qc <- FetchData(sampleA, vars=c("nFeature_RNA","nCount_RNA","percent.mt"))
+mtPlot2 <- sampleA.qc %>%
+          mutate(keep = if_else(nCount_RNA > 500 & nFeature_RNA < 7000 & percent.mt < 10, "keep", "remove")) %>%
+          ggplot() + geom_point(aes(nCount_RNA, nFeature_RNA, colour=keep), alpha=.50) + scale_x_log10() + scale_y_log10();  mtPlot2
+ggsave("figures/2_scatter_plot_mt.jpeg",plot = mtPlot2, bg = 'white')
+
+##you can filter our cells with Mt greater than 10%
+sampleA <- subset(sampleA, nCount_RNA > 500 & nFeature_RNA < 7000 & percent.mt < 10)
+
+```
+
+
+**Exploratory Analysis**
+
+*We can observe patterns of gene expression across cells *
+Here we are focus on highly variable genes, such that genes that do not vary across cells would not contribute much to downstream analysis. So we  focus on the top 2000 genes. 
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#To model the mean/variance relationship we apply the variance stablizing transformation (vst)
+sampleA <- FindVariableFeatures(sampleA, selection.method = "vst", nfeatures = 2000)
+
+#You can look at the top 5 most variable genes across cells 
+top5 <- head(VariableFeatures(sampleA), 5); top5
+
+##you can use library(gprofiler2) to visualize the possible functions
+output <- paste0('c("', paste(top5, collapse = '", "'), '")'); cat(output) ##creates a string to use in the gost
+gost_results <- gost(query = c("CAPS", "C20orf85", "GSTA1", "C9orf24", "IGFBP7"),  organism = "hsapiens"); gost_results$result
+enrichgenes <- gostplot(gost_results, capped = FALSE, interactive = FALSE); enrichgenes
+ggsave("figures/3_enrichgenes_mt.jpeg",plot = enrichgenes, bg = 'white')
+
+## unkown enrichment, but if you had immune genes such as these, you will see how it looks
+gostres <- gost(query = c("CD14", "IFNB", "TNF"),  organism = "hsapiens"); gostres$result
+
+##We can also plot and show th top 2000 genes against the rest
+variable_genes <- VariableFeaturePlot(sampleA)
+variable_genes_plot <- LabelPoints(plot=variable_genes, points = top5, repel=T, xnudge=0, ynudge=0) + theme(legend.position="none"); variable_genes_plot  # color the 2000 and label the top10
+ggsave("figures/4_VariableFeaturePlot.jpeg",plot = variable_genes_plot, bg = 'white')
+
+saveRDS(sampleA, "rds_images/sampleA_findvariablefeaturs.rds")
+```

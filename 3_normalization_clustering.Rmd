@@ -1,0 +1,203 @@
+---
+title: "Normalisation & Clustering"
+author: "Collins"
+date: "19/02/2025"
+output:
+  html_document:
+    df_print: paged
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+*Setup*
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Load Packages and set working Dir**
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+pacman::p_load(BiocManager, gggraph, ggplot2, clustree, hdf5r,R.utils,seurat-data,
+               scRepertoire, Seurat, scater, scDblFinder,harmony,seurat-wrappers,
+               celldex, SingleR,clusterProfiler, org.Hs.eg.db, 
+               dplyr, Matrix, rmarkdown, gprofiler2, install = F)
+
+setwd("/home2/cmmoranga/training_2025/usamrd_scrnaseq_workshop")
+sampleA <- readRDS("rds_images/sampleA_findvariablefeaturs.rds")
+```
+
+**Normalisation and clustering**
+*We will normalise the genes such that the expression does not vary too much from a variance*
+*Since we are using the packag Seurat, it stores the scaled and and unscaled dat in the object, thus you can change the scaling methods anytime*
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+##We use the normalisedata function in Seurat
+sampleA = NormalizeData(sampleA)
+all.genes <- rownames(sampleA)
+##Then default function for centering & scaling the data
+sampleA <- ScaleData(sampleA, features = all.genes)
+##Visualise a subset and see the scaling
+sampleA[["RNA"]][1:10,1:20]
+
+##After scaling and centering we can perform dimensional reduction usinf RunPCA from seurat
+sampleA <- RunPCA(sampleA, features = VariableFeatures(sampleA))
+pca_plot <- DimPlot(sampleA, reduction="pca"); pca_plot
+ggsave("figures/5_pca_plot.jpeg",plot = pca_plot, bg = 'white')
+###What does the PCA tell us?
+###Seems like majority of the variation is coming from one cluster or dimensional space, lets see the genes contributing to this behaviour
+
+##First we plot the eigen values
+pca = sampleA[["pca"]]
+## get the eigenvalues
+eigenvalues <- pca@stdev^2
+explained_variance <- eigenvalues / pca@misc$total.variance
+##make a dataframe
+pca.data <- data.frame(
+  PC = factor(seq_along(eigenvalues)),
+  percVar = explained_variance * 100,
+  cumulVar = cumsum(explained_variance * 100)
+)
+##Plot the eigen values
+eigenplot <- pca.data[1:10,] %>% ggplot(aes(x=PC, y=percVar)) + geom_bar(stat='identity') + 
+          geom_hline(yintercept = 1, colour="red", linetype=3) + labs(title="Variance Explanation by PCA") +
+          xlab("Principal Components") + ylab("Percentage of Explained Variance") + theme_bw(); eigenplot
+ggsave("figures/6_eigenplot.jpeg",plot = eigenplot, bg = 'white')
+##PC1 accounts for most of the variation per cell, while the other PCS seem to be measuring relative xpression of fewer genes
+
+##We can use seurat function DimHeatmap to see the top genes for each PC
+#png("7_dimheatmap_components.png", res= 300, height = 1920, width = 1920, type="cairo") #if doing it locally
+DimHeatmap(sampleA, dims = 1:2)
+#dev.off()
+DimHeatmap(sampleA, dims = 1:10)
+##We expect relative expression, what do you see?
+
+##PC1 is not balancing expression, its just showing overal signal from a bunch of genes while the other PCS are shoing relative expression for genes
+
+##We can show the feature plot by PC
+PC_featureplot <- FeaturePlot(sampleA, features="nCount_RNA")
+PC_featureplot
+ggsave("figures/7_PC_FeaturePlot.jpeg",plot = PC_featureplot, bg = 'white')
+```
+
+*We saw this variation, now we know which PC drives, we can try correct it by*
+*1)dividing the the counts for each genes by the total UMI*
+*2)Then we can Log Notrmalize (earlier we just did normalize) *
+*3)recenter and rescale data (we will multiply by a scaling factor of 10,000 - abitrary number but just common practice*
+##Example below, you can try it and see if there is 
+##sampleA = NormalizeData(sampleA, normalization.method="LogNormalize",scale.factor=10000)
+##sampleA = FindVariableFeatures(sampleA, selection.method="vst",nfeatures=2000)
+*although from experience nothing changes, there are other ways to correct which we will see when integrating the data*
+
+***Uniform Manifold Approximation and Projection (UMAP)***
+
+*PCA is linear, UMAP is non-linear allow for several dimensions. We basically use dimensionally reduced data through PCA to speed up UMAP computation, but it can still use original dataset*
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+##Another quick way to look a the eignvalues for the PCs is to use an elbow plot
+elbow_pca <- ElbowPlot(sampleA, ndims=50); elbow_pca
+ggsave("figures/8_elbow_pca.jpeg",plot = elbow_pca, bg = 'white')
+## You that after PC30 the dot literally flaten out, meaning that the PCs are not contributing much to the observed variation 
+
+##Now lets run UMAP; you can play around the dims and see how different the UMAP looks like depending on the total variation in the slected PCs
+sampleA <- RunUMAP(sampleA, dims=1:15, verbose=F)
+UMAP_Plot <- DimPlot(sampleA, label=T) + NoLegend();  ##You see better clusters than the dimensional reduction plot
+ggsave("figures/9_umap_plot_1.jpeg",plot = UMAP_Plot, bg = 'white')
+
+##You can color them and confirm that the small clusters are not driven by mitochodria counts
+UMAP_Plot2 <- FeaturePlot(sampleA, features=c("percent.mt")); UMAP_Plot2
+ggsave("figures/10_umap_plot_2.jpeg",plot = UMAP_Plot2, bg = 'white')
+
+##Color by PCs, top genes, 
+UMAP_Plot3 <- FeaturePlot(sampleA, features=c("PC_1"));UMAP_Plot3 ##you see pc1 majority of the cells have near zero expression
+UMAP_Plot4 <- FeaturePlot(sampleA, features=c("PC_2"));UMAP_Plot4 ## shows very good relative expression as we saw earlier
+UMAP_Plot5 <- FeaturePlot(sampleA, features=c("CAPS", "C20orf85", "GSTA1", "C9orf24", "IGFBP7"));UMAP_Plot5 ## top genes from yesterday
+##We see that most of the top genes which we thought we not very informative are found in a very small cluster
+
+```
+
+
+***Formal Clustering - using the Nearest-neighbor graph representation***
+
+*We will use the Louvain algorithm to identify clusters/communities within the Nearest-neighbor graph*
+*Seurat has coded them simply as FindNeigbor and Findcluster*
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+##See implementation below
+sampleA <- FindNeighbors(sampleA, dims=1:20)
+sampleA <- FindClusters(sampleA)
+
+##We can now replot the UMAP per cluster
+UMAP_Plot6 <- DimPlot(sampleA, reduction="umap"); UMAP_Plot6
+ggsave("figures/11_UMAP_Plot6.jpeg",plot = UMAP_Plot6, bg = 'white')
+
+##Shows 16 clusters, We can increase this or decrease by changing the resolution. Try this implementation below
+sampleA <- FindClusters(sampleA, resolution=0.05)
+UMAP_Plot7 <- DimPlot(sampleA, reduction="umap"); UMAP_Plot7 ##Only two clusters
+sampleA <- FindClusters(sampleA, resolution=10)
+UMAP_Plot7 <- DimPlot(sampleA, reduction="umap"); UMAP_Plot7 #63 clusters
+##this is beneficial when the type of sample you are analyzing can vary by the number of clusters you suspect are present.
+## We call this granularity - you can increase or reduce the granularity of the clusters as you wish but you can also implement algorithms to find the optimum resolution for your clusters. 
+
+##You can study granularity through the clustertree function
+clustertreeplot <- clustree(sampleA,prefix="RNA_snn_res."); clustertreeplot
+ggsave("12_clustree.jpeg",plot = clustertreeplot, bg = 'white', width = 16, height = 9)
+
+##For now lets work with the high level clusters 0,1,3,4, which we can clearly see
+sampleA <- FindClusters(sampleA, resolution=0.05)
+
+##Then we need to identify "Marker genes" - essentially genes that define the cluster
+##Let do this for cluster 0
+cluster0.markers <- FindMarkers(sampleA, ident.1=0, min.pct=0.25)
+head(cluster0.markers)
+##The significance is between cluster 0 and the othe clusters(Treats them as study populations)
+##You can confirm this with feature plot
+feature_cluster0 <- FeaturePlot(sampleA,features="C1QA"); feature_cluster0
+ggsave("13_FeaturePlot_cluster0.png",plot = feature_cluster0, bg = 'white')
+##Looks acurate, there is less of this gene in the other clusters. So that's  good. 
+
+##Another way to visualise is using violin plots - especially when showing more than one gene
+top6 <- rownames(cluster0.markers) %>% head
+output <- paste0('c("', paste(top6, collapse = '", "'), '")'); cat(output) ##creates a string to use in the gost
+violinplot_cluster0 <- VlnPlot(sampleA, features=c("C1QA", "C1QC", "C1QB", "TCEA3", "IFI6", "PTAFR")); violinplot_cluster0
+
+##Abit tideous if you have to do this for each cluster - you can use FindAllMarkers to compute for all the clusters
+sampleA.markers = FindAllMarkers(sampleA, only.pos=TRUE,min.pct=0.25, logfc.threshold=0.25)
+head(sampleA.markers)
+topMarkers <- sampleA.markers %>%  group_by(cluster) %>%  top_n(n=5, wt=avg_log2FC)
+heatmap_all <- DoHeatmap(sampleA, features = topMarkers$gene) + NoLegend(); heatmap_all
+
+```
+
+
+***GO enrichment of the top markers***
+
+*Identify the pathways that are enriched in the differentially expressed genes between clusters*
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+##Select the genes with log fold change above 1a dn adjusted p value above 0.1 (relaxed right)
+deg_genes = sampleA.markers %>%
+  filter(abs(avg_log2FC) > 1, p_val_adj < 0.10) %>%
+  dplyr::select(gene) %>% pull(); head(deg_genes)
+
+###Then we use clusterprofiler to find the go enrichment terms for the genes
+##First we map out the entrez IDs
+deg_map = bitr(deg_genes, fromType="SYMBOL",toType="ENTREZID", OrgDb="org.Hs.eg.db"); head(deg_map)
+
+##Then we group the genes to BP ontologies
+clusteprofiled_genes = groupGO(gene = deg_map$ENTREZID,OrgDb = org.Hs.eg.db, ont = "BP",readable = TRUE)
+head(clusteprofiled_genes)
+##You can kep changing the ontologies to different groups such as MF, MC - try that
+
+##We can also compute over-representation analysis based on the 
+Go_overep_analysis <- enrichGO(gene = deg_map$ENTREZID, OrgDb = org.Hs.eg.db,ont = "BP",
+                pAdjustMethod = "BH", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05, readable      = TRUE)
+head(Go_overep_analysis)
+
+## try figuring out how to plot this GO enrichment results
+
+```
